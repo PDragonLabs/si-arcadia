@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SI Arcadia — Matrix Invaders</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #0f0;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  #game-container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    max-width: 1600px;
+    max-height: 900px;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    background: #000;
+    box-shadow: 0 0 40px #0f0, inset 0 0 60px rgba(0,255,0,0.1);
+  }
+  #overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: clamp(18px, 3vw, 32px);
+    text-shadow: 0 0 10px #0f0;
+    letter-spacing: 4px;
+  }
+  .scanlines {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0,0,0,0.15),
+      rgba(0,0,0,0.15) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    mix-blend-mode: multiply;
+  }
+  #instructions {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 13px;
+    opacity: 0.7;
+    text-align: center;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="game" width="1280" height="720"></canvas>
+  <div class="scanlines"></div>
+  <div id="overlay"></div>
+  <div id="instructions">← → or A/D move &nbsp;|&nbsp; SPACE / CLICK shoot &nbsp;|&nbsp; ENTER start / restart</div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+// Game constants
+const W = canvas.width;
+const H = canvas.height;
+const GROUND_Y = H - 90;
+
+// Matrix rain
+const columns = Math.floor(W / 18);
+const drops = new Array(columns).fill(1);
+const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZｦｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ';
+
+// Game state
+let state = 'attract'; // attract | playing | gameover | win
+let score = 0;
+let hiScore = parseInt(localStorage.getItem('siArcadiaHi') || '012380');
+let lives = 3;
+let level = 1;
+let credits = 0;
+
+// Player
+const player = {
+  x: W / 2,
+  y: GROUND_Y - 20,
+  w: 48,
+  h: 36,
+  speed: 7,
+  cooldown: 0
+};
+
+// Bullets & invaders
+let bullets = [];
+let enemyBullets = [];
+let invaders = [];
+let invaderDir = 1;
+let invaderSpeed = 1.2;
+let invaderDrop = 0;
+let shootTimer = 0;
+
+// Particles / explosions
+let particles = [];
+
+// Input
+const keys = {};
+let mouseX = W / 2;
+
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Enter' || e.code === 'Space') {
+    if (state === 'attract' || state === 'gameover' || state === 'win') {
+      startGame();
+    }
+  }
+  if (e.code === 'Space' && state === 'playing') e.preventDefault();
+});
+document.addEventListener('keyup', e => keys[e.code] = false);
+
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  mouseX = (e.clientX - rect.left) * scaleX;
+});
+canvas.addEventListener('click', e => {
+  if (state === 'playing') shoot();
+  else startGame();
+});
+
+function startGame() {
+  score = 0;
+  lives = 3;
+  level = 1;
+  credits = Math.max(0, credits - 1);
+  resetLevel();
+  state = 'playing';
+  overlay.textContent = '';
+}
+
+function resetLevel() {
+  bullets = [];
+  enemyBullets = [];
+  particles = [];
+  createInvaders();
+  invaderDir = 1;
+  invaderSpeed = 1.2 + (level - 1) * 0.4;
+  player.x = W / 2;
+  player.cooldown = 0;
+}
+
+function createInvaders() {
+  invaders = [];
+  const rows = 5;
+  const cols = 11;
+  const iw = 42;
+  const ih = 32;
+  const startX = (W - cols * (iw + 12)) / 2 + 20;
+  const startY = 140;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      invaders.push({
+        x: startX + c * (iw + 12),
+        y: startY + r * (ih + 10),
+        w: iw,
+        h: ih,
+        type: r < 2 ? 0 : r < 4 ? 1 : 2,
+        alive: true,
+        frame: 0
+      });
+    }
+  }
+}
+
+function shoot() {
+  if (player.cooldown > 0 || state !== 'playing') return;
+  bullets.push({
+    x: player.x,
+    y: player.y - 20,
+    w: 4,
+    h: 18,
+    speed: 12
+  });
+  player.cooldown = 18;
+  // Simple beep
+  playTone(440, 0.06, 'square');
+}
+
+// Single shared AudioContext for better performance and browser compatibility
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return audioCtx;
+}
+
+function playTone(freq, dur, type = 'square') {
+  try {
+    const ac = getAudioCtx();
+    if (ac.state === 'suspended') ac.resume();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.08, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start();
+    o.stop(ac.currentTime + dur);
+  } catch (e) {}
+}
+
+function updateMatrix() {
+  for (let i = 0; i < drops.length; i++) {
+    if (Math.random() > 0.975) drops[i] = 0;
+    drops[i] += 0.6 + Math.random() * 0.4;
+    if (drops[i] * 16 > H) drops[i] = 0;
+  }
+}
+
+function drawMatrix() {
+  ctx.font = '16px monospace';
+  for (let i = 0; i < drops.length; i++) {
+    const char = chars[Math.floor(Math.random() * chars.length)];
+    const y = drops[i] * 16;
+    ctx.fillStyle = `rgba(0,255,0,${0.4 + Math.random()*0.4})`;
+    ctx.fillText(char, i * 18, y);
+    // Trail
+    ctx.fillStyle = 'rgba(0,180,0,0.15)';
+    for (let t = 1; t < 8; t++) {
+      if (y - t*16 > 0) ctx.fillText(chars[Math.floor(Math.random()*chars.length)], i*18, y - t*16);
+    }
+  }
+}
+
+function drawPyramid(x, y, scale = 1, glow = true) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  if (glow) {
+    ctx.shadowColor = '#0f0';
+    ctx.shadowBlur = 18;
+  }
+  ctx.strokeStyle = '#0f0';
+  ctx.lineWidth = 2.5;
+  // Main pyramid
+  ctx.beginPath();
+  ctx.moveTo(0, -32);
+  ctx.lineTo(-28, 10);
+  ctx.lineTo(28, 10);
+  ctx.closePath();
+  ctx.stroke();
+  // Inner lines for wireframe look
+  ctx.beginPath();
+  ctx.moveTo(0, -32);
+  ctx.lineTo(0, 10);
+  ctx.moveTo(-18, -4);
+  ctx.lineTo(18, -4);
+  ctx.moveTo(-14, 4);
+  ctx.lineTo(14, 4);
+  ctx.stroke();
+  // Base platform
+  ctx.strokeRect(-26, 8, 52, 8);
+  ctx.fillStyle = 'rgba(0,255,0,0.1)';
+  ctx.fillRect(-26, 8, 52, 8);
+  ctx.restore();
+}
+
+function drawInvader(inv) {
+  ctx.save();
+  ctx.translate(inv.x + inv.w/2, inv.y + inv.h/2);
+  ctx.shadowColor = '#0f0';
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = '#0f0';
+  ctx.strokeStyle = '#0f0';
+
+  // Simple pixel-style invaders based on type
+  const s = 3;
+  const anim = Math.floor(Date.now() / 300) % 2;
+  ctx.translate(0, anim ? 1 : -1);
+
+  if (inv.type === 0) { // top - squid like
+    ctx.fillRect(-8*s, -4*s, 16*s, 4*s);
+    ctx.fillRect(-6*s, -8*s, 4*s, 4*s);
+    ctx.fillRect(2*s, -8*s, 4*s, 4*s);
+    ctx.fillRect(-10*s, 0, 4*s, 4*s);
+    ctx.fillRect(6*s, 0, 4*s, 4*s);
+  } else if (inv.type === 1) { // crab
+    ctx.fillRect(-10*s, -6*s, 20*s, 6*s);
+    ctx.fillRect(-8*s, -10*s, 4*s, 4*s);
+    ctx.fillRect(4*s, -10*s, 4*s, 4*s);
+    ctx.fillRect(-12*s, 0, 4*s, 6*s);
+    ctx.fillRect(8*s, 0, 4*s, 6*s);
+    ctx.fillRect(-6*s, 2*s, 4*s, 4*s);
+    ctx.fillRect(2*s, 2*s, 4*s, 4*s);
+  } else { // bottom
+    ctx.fillRect(-8*s, -5*s, 16*s, 8*s);
+    ctx.fillRect(-10*s, -2*s, 4*s, 4*s);
+    ctx.fillRect(6*s, -2*s, 4*s, 4*s);
+    ctx.fillRect(-6*s, 3*s, 4*s, 4*s);
+    ctx.fillRect(2*s, 3*s, 4*s, 4*s);
+  }
+  ctx.restore();
+}
+
+function drawUI() {
+  ctx.font = 'bold 22px "Courier New", monospace';
+  ctx.fillStyle = '#0f0';
+  ctx.shadowColor = '#0f0';
+  ctx.shadowBlur = 6;
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE', 40, 40);
+  ctx.fillText(String(score).padStart(6, '0'), 40, 68);
+
+  ctx.textAlign = 'center';
+  ctx.fillText('HI-SCORE', W/2, 40);
+  ctx.fillText(String(hiScore).padStart(6, '0'), W/2, 68);
+
+  ctx.textAlign = 'right';
+  ctx.fillText('LIVES', W - 40, 40);
+  // Draw life icons as small pyramids
+  for (let i = 0; i < lives; i++) {
+    drawPyramid(W - 180 + i * 50, 58, 0.45, false);
+  }
+
+  // Bottom bar
+  ctx.font = 'bold 20px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`CREDITS ${String(credits).padStart(2,'0')}`, 40, H - 30);
+
+  ctx.textAlign = 'center';
+  if (state === 'attract') {
+    ctx.fillText('1UP', W/2, H - 55);
+    ctx.fillText('------  INSERT COIN  ------', W/2, H - 28);
+  } else {
+    ctx.fillText(`LEVEL ${String(level).padStart(2,'0')}`, W/2, H - 30);
+  }
+
+  ctx.textAlign = 'right';
+  ctx.fillText(`LEVEL ${String(level).padStart(2,'0')}`, W - 40, H - 30);
+
+  ctx.shadowBlur = 0;
+}
+
+function update() {
+  updateMatrix();
+
+  if (state !== 'playing') return;
+
+  // Player movement
+  if (keys['ArrowLeft'] || keys['KeyA']) player.x -= player.speed;
+  if (keys['ArrowRight'] || keys['KeyD']) player.x += player.speed;
+  if (mouseX > 0) player.x += (mouseX - player.x) * 0.12; // soft mouse follow
+  player.x = Math.max(40, Math.min(W - 40, player.x));
+
+  if ((keys['Space'] || keys['ArrowUp']) && player.cooldown <= 0) shoot();
+  if (player.cooldown > 0) player.cooldown--;
+
+  // Bullets
+  bullets.forEach(b => b.y -= b.speed);
+  bullets = bullets.filter(b => b.y > 0);
+
+  // Enemy bullets
+  enemyBullets.forEach(b => b.y += b.speed);
+  enemyBullets = enemyBullets.filter(b => b.y < H);
+
+  // Invaders movement
+  let hitEdge = false;
+  invaders.forEach(inv => {
+    if (!inv.alive) return;
+    inv.x += invaderDir * invaderSpeed;
+    if (inv.x < 30 || inv.x + inv.w > W - 30) hitEdge = true;
+  });
+  if (hitEdge) {
+    invaderDir *= -1;
+    invaders.forEach(inv => { if (inv.alive) inv.y += 18; });
+    invaderSpeed = Math.min(invaderSpeed + 0.15, 6);
+  }
+
+  // Enemy shooting
+  shootTimer++;
+  if (shootTimer > 40 + Math.random()*30) {
+    const alive = invaders.filter(i => i.alive);
+    if (alive.length) {
+      const shooter = alive[Math.floor(Math.random() * alive.length)];
+      enemyBullets.push({
+        x: shooter.x + shooter.w/2,
+        y: shooter.y + shooter.h,
+        w: 4, h: 12, speed: 4 + level * 0.5
+      });
+      shootTimer = 0;
+    }
+  }
+
+  // Collisions - player bullets vs invaders
+  bullets.forEach(b => {
+    invaders.forEach(inv => {
+      if (!inv.alive) return;
+      if (b.x > inv.x && b.x < inv.x + inv.w && b.y > inv.y && b.y < inv.y + inv.h) {
+        inv.alive = false;
+        b.y = -100;
+        score += [30, 20, 10][inv.type] * level;
+        if (score > hiScore) {
+          hiScore = score;
+          localStorage.setItem('siArcadiaHi', hiScore);
+        }
+        // Explosion particles
+        for (let i = 0; i < 8; i++) {
+          particles.push({
+            x: inv.x + inv.w/2,
+            y: inv.y + inv.h/2,
+            vx: (Math.random()-0.5)*6,
+            vy: (Math.random()-0.5)*6,
+            life: 20
+          });
+        }
+        playTone(180, 0.08, 'sawtooth');
+      }
+    });
+  });
+
+  // Enemy bullets vs player
+  enemyBullets.forEach(b => {
+    if (Math.abs(b.x - player.x) < 22 && b.y > player.y - 20 && b.y < player.y + 10) {
+      b.y = H + 100;
+      lives--;
+      playTone(80, 0.3, 'sawtooth');
+      if (lives <= 0) {
+        state = 'gameover';
+        overlay.textContent = 'GAME OVER\nPRESS ENTER';
+      }
+    }
+  });
+
+  // Invaders reach bottom
+  if (invaders.some(inv => inv.alive && inv.y + inv.h > GROUND_Y - 10)) {
+    lives = 0;
+    state = 'gameover';
+    overlay.textContent = 'GAME OVER\nPRESS ENTER';
+  }
+
+  // Win level
+  if (invaders.every(inv => !inv.alive)) {
+    level++;
+    if (level > 10) {
+      state = 'win';
+      overlay.textContent = 'YOU WIN!\nPRESS ENTER';
+    } else {
+      resetLevel();
+      // brief pause feeling
+    }
+  }
+
+  // Particles
+  particles.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life--;
+  });
+  particles = particles.filter(p => p.life > 0);
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  drawMatrix();
+
+  // Grid floor
+  ctx.strokeStyle = 'rgba(0,255,0,0.15)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 20; i++) {
+    const y = GROUND_Y + i * 8;
+    const spread = i * 40;
+    ctx.beginPath();
+    ctx.moveTo(W/2 - 200 - spread, y);
+    ctx.lineTo(W/2 + 200 + spread, y);
+    ctx.stroke();
+  }
+  for (let i = -10; i <= 10; i++) {
+    ctx.beginPath();
+    ctx.moveTo(W/2 + i*30, GROUND_Y);
+    ctx.lineTo(W/2 + i*80, H);
+    ctx.stroke();
+  }
+
+  if (state === 'attract') {
+    // Static-ish formation for attract mode
+    if (invaders.length === 0) createInvaders();
+    invaders.forEach(inv => {
+      if (inv.alive) drawInvader(inv);
+    });
+    // Demo laser in attract mode
+    ctx.strokeStyle = '#0f0';
+    ctx.shadowBlur = 20;
+    ctx.shadowColor = '#0f0';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(W/2, GROUND_Y - 50);
+    ctx.lineTo(W/2, 260);
+    ctx.stroke();
+    // Bright tip
+    ctx.fillStyle = '#fff';
+    ctx.shadowBlur = 25;
+    ctx.beginPath();
+    ctx.arc(W/2, 260, 6, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#0f0';
+    ctx.beginPath();
+    ctx.arc(W/2, 260, 3, 0, Math.PI*2);
+    ctx.fill();
+    drawPyramid(W/2, GROUND_Y);
+  } else {
+    // Playing / gameover
+    invaders.forEach(inv => { if (inv.alive) drawInvader(inv); });
+
+    // Player bullets
+    ctx.fillStyle = '#0f0';
+    ctx.shadowBlur = 10;
+    bullets.forEach(b => {
+      ctx.fillRect(b.x - 2, b.y, 4, 16);
+    });
+
+    // Enemy bullets
+    enemyBullets.forEach(b => {
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(b.x - 2, b.y, 4, 12);
+    });
+
+    drawPyramid(player.x, player.y);
+
+    // Particles
+    particles.forEach(p => {
+      ctx.globalAlpha = p.life / 20;
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(p.x, p.y, 3, 3);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  drawUI();
+
+  if (state === 'gameover') {
+    ctx.font = 'bold 48px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#0f0';
+    ctx.shadowBlur = 20;
+    ctx.fillText('GAME OVER', W/2, H/2 - 20);
+    ctx.font = '24px "Courier New", monospace';
+    ctx.fillText('PRESS ENTER TO CONTINUE', W/2, H/2 + 40);
+  }
+  if (state === 'win') {
+    ctx.font = 'bold 48px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#0f0';
+    ctx.shadowBlur = 20;
+    ctx.fillText('YOU CLEARED THE GRID', W/2, H/2 - 20);
+    ctx.font = '24px "Courier New", monospace';
+    ctx.fillText('PRESS ENTER TO PLAY AGAIN', W/2, H/2 + 40);
+  }
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Init attract mode invaders
+createInvaders();
+loop();
+
+// Update overlay for attract
+setInterval(() => {
+  if (state === 'attract') {
+    overlay.innerHTML = 'PRESS ENTER OR CLICK TO START<br><span style="font-size:0.6em;opacity:0.8">DEFEND THE PYRAMID</span>';
+  }
+}, 100);
+</script>
+</body>
+</html>
