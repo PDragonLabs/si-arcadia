@@ -1,5 +1,7 @@
 # SI Arcadia — Matrix Invaders
 
+![SI Arcadia](si-arcadia.png)
+
 A fully playable browser-based arcade game inspired by classic Space Invaders, reimagined with a green phosphor Matrix digital-rain aesthetic and a pyramid defender base.
 
 Created from a retro arcade cabinet image featuring falling code, invader formations, scores, lives, and an "INSERT COIN" prompt.
